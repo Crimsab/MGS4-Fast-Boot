@@ -2,6 +2,7 @@
 #include <bcrypt.h>
 #include <shellapi.h>
 #include <MinHook.h>
+#include <release_config.h>
 
 #include <array>
 #include <cwctype>
@@ -20,14 +21,16 @@ using create_process_w_fn = BOOL(WINAPI *)(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTE
 create_process_w_fn g_create_process_w = nullptr;
 std::filesystem::path g_launcher_directory;
 std::filesystem::path g_game_executable;
-constexpr wchar_t expected_launcher_hash[] = L"DAF16D8A6C2A4E0E4480D08D865EB9F6A445A05CF1F238EB2D4391048E35A561";
-constexpr wchar_t expected_game_hash[] = L"9E8DF67EA7F41E7F8306CE1A77584707209069B3C75389B3F00445EFE459FE41";
+constexpr wchar_t expected_launcher_hash[] = MGS4_FAST_BOOT_LAUNCHER_SHA256;
+constexpr wchar_t expected_game_hash[] = MGS4_FAST_BOOT_GAME_SHA256;
 
 std::filesystem::path module_path(HMODULE module)
 {
     std::vector<wchar_t> buffer(32768);
     const DWORD length = GetModuleFileNameW(module, buffer.data(), static_cast<DWORD>(buffer.size()));
-    return length > 0 && length < buffer.size() ? std::filesystem::path(std::wstring(buffer.data(), length)) : std::filesystem::path();
+    return length > 0 && static_cast<size_t>(length) < buffer.size()
+        ? std::filesystem::path(std::wstring(buffer.data(), length))
+        : std::filesystem::path();
 }
 
 void log_line(const std::string &message)
@@ -58,7 +61,7 @@ std::wstring sha256_file(const std::filesystem::path &path)
     bool success = true;
     while (input)
     {
-        input.read(buffer.data(), buffer.size());
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         const std::streamsize count = input.gcount();
         if (count > 0 && BCryptHashData(hash, reinterpret_cast<unsigned char *>(buffer.data()), static_cast<ULONG>(count), 0) < 0)
         {

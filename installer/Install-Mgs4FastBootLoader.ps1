@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Uninstall')]
+    [ValidateSet('Install', 'Uninstall', 'Validate')]
     [string]$Action = 'Install',
     [string]$GameRoot
 )
@@ -9,6 +9,36 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path $PSScriptRoot -Parent
+$packagePayload = $PSScriptRoot
+$developmentPayload = Join-Path $projectRoot 'dist\payload'
+$distRoot = if (Test-Path -LiteralPath (Join-Path $packagePayload 'manifest.json') -PathType Leaf) {
+    $packagePayload
+} else {
+    $developmentPayload
+}
+$distManifest = Join-Path $distRoot 'manifest.json'
+if (-not (Test-Path -LiteralPath $distManifest -PathType Leaf)) {
+    throw 'The Fast Boot payload is missing or incomplete. Download the release archive again or run build.ps1.'
+}
+$built = Get-Content -LiteralPath $distManifest -Raw | ConvertFrom-Json
+$sourceProxy = Join-Path $distRoot 'version.dll'
+$sourcePlugin = Join-Path $distRoot 'MGS4FastBoot.asi'
+$sourceConfig = Join-Path $distRoot 'MGS4FastBoot.ini'
+if ((Get-FileHash -LiteralPath $sourceProxy -Algorithm SHA256).Hash -ne $built.ProxySha256 -or
+    (Get-FileHash -LiteralPath $sourcePlugin -Algorithm SHA256).Hash -ne $built.PluginSha256 -or
+    (Get-FileHash -LiteralPath $sourceConfig -Algorithm SHA256).Hash -ne $built.ConfigSha256) {
+    throw 'Fast Boot payload hash verification failed.'
+}
+if ($Action -eq 'Validate') {
+    [pscustomobject]@{
+        Action = $Action
+        Valid = $true
+        Version = $built.Version
+        PayloadRoot = $distRoot
+    }
+    return
+}
+
 if ([string]::IsNullOrWhiteSpace($GameRoot)) {
     try {
         $steamPath = (Get-ItemProperty -LiteralPath 'HKCU:\Software\Valve\Steam' -ErrorAction Stop).SteamPath
@@ -40,10 +70,6 @@ if ([string]::IsNullOrWhiteSpace($GameRoot)) {
     }
 }
 $GameRoot = [IO.Path]::GetFullPath($GameRoot)
-if ($null -ne (Get-Process -Name 'mgs4', 'launcher' -ErrorAction SilentlyContinue | Select-Object -First 1)) {
-    throw 'Close MGS4 and its launcher before changing the seamless Fast Boot loader.'
-}
-
 $launcherRoot = Join-Path $GameRoot 'Launcher'
 $pluginsRoot = Join-Path $launcherRoot 'plugins'
 $launcherExecutable = Join-Path $launcherRoot 'launcher.exe'
@@ -52,6 +78,16 @@ $targetProxy = Join-Path $launcherRoot 'version.dll'
 $targetPlugin = Join-Path $pluginsRoot 'MGS4FastBoot.asi'
 $targetConfig = Join-Path $launcherRoot 'MGS4FastBoot.ini'
 $installManifest = Join-Path $launcherRoot 'MGS4FastBoot.install.json'
+$runningGameProcess = @(Get-Process -Name 'mgs4', 'launcher' -ErrorAction SilentlyContinue | Where-Object {
+    try {
+        $processPath = [IO.Path]::GetFullPath($_.Path)
+        $processPath -eq $launcherExecutable -or $processPath -eq $gameExecutable
+    }
+    catch { $false }
+})
+if ($runningGameProcess.Count -ne 0) {
+    throw 'Close MGS4 and its launcher before changing the seamless Fast Boot loader.'
+}
 
 if ($Action -eq 'Uninstall') {
     if (-not (Test-Path -LiteralPath $installManifest -PathType Leaf)) {
@@ -70,51 +106,47 @@ if ($Action -eq 'Uninstall') {
         $hash = (Get-FileHash -LiteralPath $targetProxy -Algorithm SHA256).Hash
         if ($hash -ne $installed.ProxySha256) { throw 'Installed ASI loader proxy was modified; refusing a partial uninstall.' }
     }
+    $configBackup = $null
+    $preserveConfig = $false
     if (Test-Path -LiteralPath $targetConfig) {
-        $hash = (Get-FileHash -LiteralPath $targetConfig -Algorithm SHA256).Hash
         $configProperty = $installed.PSObject.Properties['ConfigSha256']
-        $expectedConfigHash = if ($null -ne $configProperty) { $configProperty.Value } else { 'CC5A7616158953F9E5624622CE7B6AAC2D8CAA1773734282D510E5CEB6937581' }
-        if ($hash -ne $expectedConfigHash) {
-            throw 'Fast Boot configuration was modified; restore it or remove the deployment manually.'
+        $expectedConfigHash = if ($null -ne $configProperty) { $configProperty.Value } else { $built.ConfigSha256 }
+        $preserveConfig = (Get-FileHash -LiteralPath $targetConfig -Algorithm SHA256).Hash -ne $expectedConfigHash
+        if ($preserveConfig) {
+            $configBackup = "$targetConfig.user-backup"
+            if (Test-Path -LiteralPath $configBackup) {
+                throw "Cannot preserve the modified configuration because $configBackup already exists."
+            }
         }
     }
-
     if (Test-Path -LiteralPath $targetPlugin) {
         Remove-Item -LiteralPath $targetPlugin -Force
     }
     if ($removeProxy) {
         Remove-Item -LiteralPath $targetProxy -Force
     }
-    Remove-Item -LiteralPath $targetConfig -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $targetConfig) {
+        if ($preserveConfig) {
+            Move-Item -LiteralPath $targetConfig -Destination $configBackup
+        }
+        else {
+            Remove-Item -LiteralPath $targetConfig -Force
+        }
+    }
     Remove-Item -LiteralPath (Join-Path $launcherRoot 'MGS4FastBoot.log') -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $installManifest -Force
-    [pscustomobject]@{ Action = $Action; Installed = $false; LauncherRoot = $launcherRoot }
+    [pscustomobject]@{
+        Action = $Action
+        Installed = $false
+        LauncherRoot = $launcherRoot
+        ConfigBackup = $configBackup
+        ProxyRetainedForOtherPlugins = -not $removeProxy -and (Test-Path -LiteralPath $targetProxy)
+    }
     return
 }
 
-$packagePayload = $PSScriptRoot
-$developmentPayload = Join-Path $projectRoot 'dist\fastboot-loader'
-$distRoot = if (Test-Path -LiteralPath (Join-Path $packagePayload 'manifest.json') -PathType Leaf) {
-    $packagePayload
-} else {
-    $developmentPayload
-}
-$distManifest = Join-Path $distRoot 'manifest.json'
-if (-not (Test-Path -LiteralPath $distManifest -PathType Leaf)) {
-    throw 'The Fast Boot payload is missing or incomplete. Download the release archive again.'
-}
-$built = Get-Content -LiteralPath $distManifest -Raw | ConvertFrom-Json
-$sourceProxy = Join-Path $distRoot 'version.dll'
-$sourcePlugin = Join-Path $distRoot 'MGS4FastBoot.asi'
-$sourceConfig = Join-Path $distRoot 'MGS4FastBoot.ini'
-if ((Get-FileHash -LiteralPath $sourceProxy -Algorithm SHA256).Hash -ne $built.ProxySha256 -or
-    (Get-FileHash -LiteralPath $sourcePlugin -Algorithm SHA256).Hash -ne $built.PluginSha256 -or
-    (Get-FileHash -LiteralPath $sourceConfig -Algorithm SHA256).Hash -ne $built.ConfigSha256) {
-    throw 'Fast Boot distribution hash verification failed.'
-}
-
-$expectedLauncherHash = 'DAF16D8A6C2A4E0E4480D08D865EB9F6A445A05CF1F238EB2D4391048E35A561'
-$expectedGameHash = '9E8DF67EA7F41E7F8306CE1A77584707209069B3C75389B3F00445EFE459FE41'
+$expectedLauncherHash = $built.ExpectedLauncherSha256
+$expectedGameHash = $built.ExpectedGameSha256
 if (-not (Test-Path -LiteralPath $launcherExecutable -PathType Leaf) -or
     (Get-FileHash -LiteralPath $launcherExecutable -Algorithm SHA256).Hash -ne $expectedLauncherHash) {
     throw 'The official launcher is missing or does not match the verified build.'

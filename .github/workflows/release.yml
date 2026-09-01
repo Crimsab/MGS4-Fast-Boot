@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Verify tag matches release metadata
+        shell: pwsh
+        run: |
+          $metadata = Get-Content -LiteralPath ./release.json -Raw | ConvertFrom-Json
+          $expected = "v$($metadata.version)"
+          if ($env:GITHUB_REF_NAME -ne $expected) {
+            throw "Tag $env:GITHUB_REF_NAME does not match release.json version $expected."
+          }
+
+      - name: Build, package, and verify
+        shell: pwsh
+        run: ./scripts/verify.ps1
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: MGS4-Fast-Boot-${{ github.ref_name }}
+          path: release/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $metadata = Get-Content -LiteralPath ./release.json -Raw | ConvertFrom-Json
+          $version = $metadata.version
+          gh release create $env:GITHUB_REF_NAME `
+            "release/MGS4-Fast-Boot-$version.zip" `
+            "release/MGS4-Fast-Boot-$version.manifest.json" `
+            "release/MGS4-Fast-Boot-$version.sha256" `
+            --verify-tag `
+            --title "MGS4 Fast Boot $version" `
+            --generate-notes
