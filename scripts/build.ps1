@@ -77,7 +77,8 @@ Remove-Item -LiteralPath $minHookParent -Recurse -Force -ErrorAction SilentlyCon
 New-Item -ItemType Directory -Force -Path $minHookParent | Out-Null
 Expand-Archive -LiteralPath $minHookArchive -DestinationPath $minHookParent
 
-& cmake.exe -S $root -B $build -G 'Visual Studio 17 2022' -A x64 "-DMINHOOK_DIR=$minHookSource"
+$minHookCmakePath = $minHookSource.Replace('\', '/')
+& cmake.exe -S $root -B $build -G 'Visual Studio 17 2022' -A x64 "-DMINHOOK_DIR=$minHookCmakePath"
 if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed.' }
 & cmake.exe --build $build --config Release
 if ($LASTEXITCODE -ne 0) { throw 'Compilation failed.' }
